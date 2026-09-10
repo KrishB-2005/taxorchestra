@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+.env.local
+
+# Saved interview answers hold a real SSN and real income figures.
+# Never commit one.
+.taxorchestra/
+*answers*.json
+*profile*.json
+
+# Runtime artifacts
+out/
+*.cache.sqlite
+data/samples/generated/
+
+# The blank IRS form is fetched by `taxorchestra fetch-form`, not vendored:
+# it is ~220 KB of government PDF that changes every tax year.
+data/forms/*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
