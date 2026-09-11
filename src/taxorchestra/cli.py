@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import urllib.error
 import urllib.request
 import warnings
 from pathlib import Path
@@ -37,7 +38,7 @@ from taxorchestra.llm.client import build_client
 from taxorchestra.models import Address, FilingStatus, Taxpayer
 from taxorchestra.samples import SAMPLE_SSN, write_sample_documents
 
-IRS_1040_URL = "https://www.irs.gov/pub/irs-pdf/f1040.pdf"
+IRS_PDF_BASE = "https://www.irs.gov/pub/irs-pdf"
 DEFAULT_TEMPLATE = "data/forms/f1040.pdf"
 
 app = typer.Typer(
@@ -59,22 +60,39 @@ def _build_orchestrator(provider: str | None, cache_backend: str | None) -> Orch
 
 @app.command("fetch-form")
 def fetch_form(
-    out: Annotated[Path, typer.Option(help="Where to save the blank form.")] = Path(
-        DEFAULT_TEMPLATE
-    ),
+    form: Annotated[
+        str, typer.Option(help="IRS form id, e.g. f1040, f1040sb, f1040sc, fw9.")
+    ] = "f1040",
+    out_dir: Annotated[Path, typer.Option(help="Where to save it.")] = Path("data/forms"),
 ) -> None:
-    """Download the blank Form 1040 from irs.gov.
+    """Download a blank IRS form.
 
-    Not vendored into the repo: it is a government PDF that is reissued every
-    tax year, and the cache is keyed on its digest so a new revision is picked
-    up automatically.
+    Not vendored into the repo: these are government PDFs reissued every tax
+    year, and the mapping cache is keyed on the file's digest so a new revision
+    is picked up automatically.
     """
+    url = f"{IRS_PDF_BASE}/{form}.pdf"
+    out = out_dir / f"{form}.pdf"
     out.parent.mkdir(parents=True, exist_ok=True)
-    typer.echo(f"fetching {IRS_1040_URL}")
-    with urllib.request.urlopen(IRS_1040_URL, timeout=60) as response:  # noqa: S310
-        out.write_bytes(response.read())
+    typer.echo(f"fetching {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
+            out.write_bytes(response.read())
+    except urllib.error.HTTPError as exc:
+        typer.secho(
+            f"irs.gov returned {exc.code} for {form}.pdf — check the form id",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
     year = acroform.detect_form_year(out)
-    typer.echo(f"saved {out} ({out.stat().st_size:,} bytes, tax year {year})")
+    widgets = len(acroform.load_widgets(out))
+    typer.echo(
+        f"saved {out} ({out.stat().st_size:,} bytes, {widgets} fields"
+        + (f", tax year {year}" if year else "")
+        + ")"
+    )
 
 
 @app.command()
@@ -379,6 +397,56 @@ def export_catalog(
     typer.secho(
         f"wrote {out} — {len(payload['fields'])} resolved fields "
         f"for {catalog.form_id} {catalog.form_year}",
+        fg=typer.colors.GREEN,
+    )
+
+
+@app.command("fill-form")
+def fill_any_form(
+    template: Annotated[Path, typer.Argument(help="Blank form to fill.")],
+    values: Annotated[
+        Path, typer.Option(help='JSON of {"semantic_key": value} pairs.')
+    ],
+    out: Annotated[Path, typer.Option(help="Where to write the filled form.")] = Path(
+        "out/filled.pdf"
+    ),
+    provider: Annotated[str | None, typer.Option()] = None,
+    cache: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Fill any mapped IRS form from a JSON of values.
+
+    This is the part that generalises. The mapping agent resolves field names on
+    any fillable IRS PDF, so anything it can map, this can fill. What it does
+    *not* do is work out what the values should be — that is per-form tax logic,
+    and only the 1040 ordinary-income case is implemented (`taxorchestra file`).
+
+    Run `taxorchestra map <form>` first to see the keys a form offers.
+    """
+    from taxorchestra.forms.render import render_values
+
+    if not template.exists():
+        typer.secho(f"No form at {template}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    payload = json.loads(values.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        typer.secho("values file must be a JSON object", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    agent = FormMappingAgent(build_client(provider), build_cache(cache))
+    catalog = agent.build_catalog(str(template))
+    rendered, unknown = render_values(catalog, payload, str(template))
+
+    for key in unknown:
+        typer.secho(
+            f"  no field named {key!r} on {catalog.form_id} — skipped",
+            fg=typer.colors.YELLOW,
+        )
+
+    written = acroform.fill(template, out, rendered)
+    typer.secho(
+        f"wrote {out} — {written} of {len(payload)} values placed on "
+        f"{catalog.form_id}",
         fg=typer.colors.GREEN,
     )
 

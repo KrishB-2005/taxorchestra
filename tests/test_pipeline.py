@@ -18,6 +18,7 @@ from taxorchestra.agents.orchestrator import Orchestrator
 from taxorchestra.agents.validation import ValidationAgent
 from taxorchestra.cache.store import MemoryCache, SQLiteCache
 from taxorchestra.forms import acroform
+from taxorchestra.forms.render import render_values
 from taxorchestra.knowledge.store import BM25Store
 from taxorchestra.llm.client import FixtureClient
 from taxorchestra.models import (
@@ -425,3 +426,90 @@ class TestAcroForm:
     def test_writing_an_unknown_field_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(KeyError, match="not present in the template"):
             acroform.fill(TEMPLATE, tmp_path / "x.pdf", {"no.such.field": "1"})
+
+
+# ---------------------------------------------------------------------------
+# Generalisation beyond the 1040
+# ---------------------------------------------------------------------------
+
+OTHER_FORMS = Path("data/forms")
+
+
+def _form(name: str) -> Path:
+    path = OTHER_FORMS / f"{name}.pdf"
+    if not path.exists():
+        pytest.skip(f"{name} not fetched — run `taxorchestra fetch-form --form {name}`")
+    return path
+
+
+class TestOtherForms:
+    """The mapping pipeline is not 1040-specific, and this pins that down."""
+
+    def test_schedule_b_is_a_table_and_resolves_by_column(self) -> None:
+        """Schedule B has no per-row labels — every cell comes from phase 5."""
+        agent = FormMappingAgent(FixtureClient(), MemoryCache())
+        catalog = agent.build_catalog(str(_form("f1040sb")))
+
+        labelled = [m for m in catalog.mappings if m.label_text]
+        assert len(labelled) == len(catalog.mappings), "expected full label recovery"
+        assert agent.stats.phase_counts[5] > 0, "no cells came from the table phase"
+
+        cells = [m for m in catalog.mappings if m.row is not None]
+        assert len(cells) > 20
+        # Row indices make each cell separately addressable.
+        assert "amount_row1" in catalog.by_key()
+
+    def test_a_form_id_comes_from_the_file_not_a_constant(self) -> None:
+        assert FormMappingAgent(FixtureClient(), MemoryCache()).build_catalog(
+            str(_form("f1040sb"))
+        ).form_id == "f1040sb"
+
+    def test_values_round_trip_through_an_unfamiliar_form(self, tmp_path: Path) -> None:
+        """Fill Schedule B, reopen it, and check each value landed.
+
+        This is the generalisation claim in its strongest form: a form the
+        pipeline was never tuned for, filled from semantic keys, verified by
+        reading the written PDF back rather than by trusting the writer.
+        """
+        template = _form("f1040sb")
+        catalog = FormMappingAgent(FixtureClient(), MemoryCache()).build_catalog(
+            str(template)
+        )
+
+        values = {"amount_row1": 1284, "amount_row2": 512, "amount_row3": 96}
+        rendered, unknown = render_values(catalog, values, str(template))
+        assert unknown == []
+        assert len(rendered) == len(values)
+
+        out = tmp_path / "schedule-b.pdf"
+        acroform.fill(template, out, rendered)
+
+        stored = acroform.read_back(out)
+        by_key = catalog.by_key()
+        assert stored[by_key["amount_row1"].acro_name] == "1,284"
+        assert stored[by_key["amount_row2"].acro_name] == "512"
+        assert stored[by_key["amount_row3"].acro_name] == "96"
+
+    def test_an_unknown_key_is_reported_not_silently_dropped(self) -> None:
+        template = _form("f1040sb")
+        catalog = FormMappingAgent(FixtureClient(), MemoryCache()).build_catalog(
+            str(template)
+        )
+        rendered, unknown = render_values(
+            catalog, {"not_a_field_on_this_form": 1}, str(template)
+        )
+        assert rendered == {}
+        assert unknown == ["not_a_field_on_this_form"]
+
+    @pytest.mark.parametrize(
+        ("form", "floor"),
+        [("f1040", 0.75), ("f1040sb", 0.95), ("f1040sc", 0.85), ("f1040sse", 0.95)],
+    )
+    def test_label_recovery_holds_across_the_form_family(
+        self, form: str, floor: float
+    ) -> None:
+        catalog = FormMappingAgent(FixtureClient(), MemoryCache()).build_catalog(
+            str(_form(form))
+        )
+        rate = sum(1 for m in catalog.mappings if m.label_text) / len(catalog.mappings)
+        assert rate >= floor, f"{form} recovered {rate:.0%}, expected >= {floor:.0%}"

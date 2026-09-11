@@ -255,6 +255,68 @@ def recover_caption_above(
     return candidates[0].text.rstrip(". ").strip() or None
 
 
+# Two widgets belong to the same table column when their left and right edges
+# agree to within this much. The 1040 family draws columns to the point.
+COLUMN_EDGE_TOLERANCE_PT = 2.0
+
+# A column needs at least this many cells before it is treated as a table
+# rather than a coincidence of two boxes sharing an x position.
+MIN_COLUMN_CELLS = 3
+
+
+def group_columns(widgets: list[Widget]) -> list[list[Widget]]:
+    """Group widgets into table columns, ordered top to bottom within each.
+
+    Schedules B and C and Form 8812 are mostly tables: a stack of identical
+    boxes with no per-row label, because the label is a column header printed
+    once at the top. Row-wise geometry finds nothing for these, which is why
+    Schedule B recovers a label for only 31% of its widgets before this.
+    """
+    buckets: dict[tuple[float, float], list[Widget]] = {}
+    for widget in widgets:
+        key = (
+            round(widget.x0 / COLUMN_EDGE_TOLERANCE_PT),
+            round(widget.x1 / COLUMN_EDGE_TOLERANCE_PT),
+        )
+        buckets.setdefault(key, []).append(widget)
+
+    columns = []
+    for cells in buckets.values():
+        if len(cells) >= MIN_COLUMN_CELLS:
+            columns.append(sorted(cells, key=lambda w: -w.center_y))
+    return columns
+
+
+def recover_column_header(
+    column: list[Widget],
+    runs: list[TextRun],
+    max_rise_pt: float = 42.0,
+) -> str | None:
+    """The header printed above a table column, if there is one.
+
+    Searched within the column's own horizontal span so that marginal
+    instruction prose — which the 1040 schedules set at x=36, well left of any
+    data column — cannot be mistaken for a header.
+    """
+    if not column:
+        return None
+    top = column[0]
+    candidates = [
+        r
+        for r in runs
+        if not (r.x == 0.0 and r.y == 0.0)
+        and top.y1 < r.y <= top.y1 + max_rise_pt
+        and (top.x0 - 20.0) <= r.x <= top.x1
+    ]
+    if not candidates:
+        return None
+    # Nearest above wins; ties break leftmost.
+    candidates.sort(key=lambda r: (r.y - top.y1, r.x))
+    header = candidates[0].text.rstrip(". ").strip()
+    # A bare line number is the row marker, not a header.
+    return header if header and not _LINE_LABEL.match(header) else None
+
+
 def pdf_sha256(pdf_path: str | Path) -> str:
     """Digest of the blank form.
 

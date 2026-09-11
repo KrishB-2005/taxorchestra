@@ -240,6 +240,19 @@ _LABEL_RULES: list[tuple[str, str]] = [
     (r"for details on how to pay", "amount_owed"),
     (r"subtract line 33 from line 24", "amount_owed"),
     (r"estimated tax penalty", "estimated_tax_penalty"),
+    # -- generic, last so anything 1040-specific above still wins ------
+    # These are column headers and captions that recur across the whole form
+    # family, which is what lets the fixture demonstrate a schedule at all. A
+    # real provider names arbitrary labels and needs none of this.
+    (r"^amount$", "amount"),
+    (r"^list name of payer", "payer_name"),
+    (r"^name of payer", "payer_name"),
+    (r"^description", "description"),
+    (r"^name", "name"),
+    (r"^address", "address"),
+    (r"^social security number", "ssn"),
+    (r"^employer id", "ein"),
+    (r"^date", "date"),
 ]
 
 # The semantic key is a better type signal than the label: line 25a's printed
@@ -259,7 +272,9 @@ _MONEY_KEY_PREFIXES = (
     "total_income",
     "adjusted_gross_income",
     "taxable_income",
-    "amount_owed",
+    # "amount" subsumes amount_owed, and covers the bare "Amount" column
+    # header that recurs across the schedules.
+    "amount",
     "estimated_tax_penalty",
 )
 
@@ -328,7 +343,7 @@ class FixtureClient:
 
     @staticmethod
     def _infer_type(key: str, text: str) -> str:
-        if key.endswith("_ssn"):
+        if key == "ssn" or key.endswith("_ssn"):
             return "ssn"
         if key.startswith("filing_status_"):
             return "checkbox"

@@ -16,16 +16,15 @@ differs per field.
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 from pathlib import Path
 
 from taxorchestra.agents.extraction import ExtractionAgent
 from taxorchestra.agents.mapping import FormMappingAgent
 from taxorchestra.agents.validation import ValidationAgent
 from taxorchestra.forms import acroform
+from taxorchestra.forms.render import format_value
 from taxorchestra.models import (
     FieldCatalog,
-    FieldType,
     FilingResult,
     FilingStatus,
     Form1040Return,
@@ -133,7 +132,9 @@ class Orchestrator:
             mapping = by_key.get(semantic_key)
             if mapping is None:
                 return  # unresolved field: leave the box empty rather than guess
-            rendered = self._format(mapping.field_type, raw, on_states.get(mapping.acro_name, ()))
+            rendered = format_value(
+                mapping.field_type, raw, on_states.get(mapping.acro_name, ())
+            )
             if rendered is not None:
                 values[mapping.acro_name] = rendered
 
@@ -158,38 +159,3 @@ class Orchestrator:
             put(line.semantic_key, line.value)
 
         return values
-
-    @staticmethod
-    def _format(
-        field_type: FieldType,
-        raw: object,
-        on_states: tuple[str, ...],
-    ) -> str | None:
-        if raw is None:
-            return None
-
-        if field_type is FieldType.CHECKBOX:
-            if not raw:
-                return None
-            # A checkbox takes the name of an appearance stream ("/1", "/Yes"),
-            # not a boolean. Which name is per-field, so read it off the widget.
-            return on_states[0] if on_states else "/Yes"
-
-        if field_type is FieldType.SSN:
-            # The SSN boxes are 9-cell comb fields with /MaxLen 9, so they take
-            # bare digits. pypdf will happily write "900-12-3456" into them and
-            # the result renders as overflow; pdf-lib refuses outright, which is
-            # how this surfaced.
-            digits = "".join(ch for ch in str(raw) if ch.isdigit())
-            return digits if len(digits) == 9 else None
-
-        if field_type is FieldType.MONEY:
-            amount = raw if isinstance(raw, Decimal) else Decimal(str(raw))
-            # The 1040 is filed in whole dollars. A zero line is left blank —
-            # writing "0" everywhere makes a filled form unreadable.
-            if amount == 0:
-                return None
-            return f"{amount.quantize(Decimal('1')):,}"
-
-        text = str(raw).strip()
-        return text or None

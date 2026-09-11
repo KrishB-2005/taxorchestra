@@ -159,6 +159,10 @@ class FieldMapping(StrictModel):
     field_type: FieldType = FieldType.UNKNOWN
     label_text: str = Field(default="", description="Label text recovered near the widget")
     section: str | None = Field(default=None, description="Enclosing section, e.g. 'Income'")
+    row: int | None = Field(
+        default=None,
+        description="1-based row index when this field is a cell in a table column",
+    )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     phase: int = Field(
         default=0,

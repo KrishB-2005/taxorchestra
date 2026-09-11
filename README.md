@@ -18,7 +18,7 @@ Form 1040 — tax year 2025
   line 25a  withholding_w2                         11,894
   line 37   amount_owed                               176
 
-wrote out/f1040-filled.pdf  (21/21 fields, 2.02s, cache_hit=False)
+wrote out/f1040-filled.pdf  (22/22 fields, 1.63s, cache_hit=False)
 ```
 
 > **This is not tax software.** It is a document-automation demonstration. It
@@ -63,17 +63,18 @@ them and the meaning falls out:
 f1_47[0]  ←  ['Income', '1', 'a', 'Total amount from Form(s) W-2, box 1']
 ```
 
-Four phases, cheapest first:
+Five phases, cheapest first:
 
 | Phase | What it does | Cost |
 |---|---|---|
 | 1. Geometric | Text on the widget's baseline, to its left | free |
 | 2. Structural | Carries line numbers and section headings down the page, so a continuation row labelled `b` becomes `1b` under *Income* | free |
 | 3. Caption | For the identity block, where the label is printed *above* the box and there is nothing to the left | free |
-| 4. Semantic | Hands the recovered label to Claude, gets back a canonical `snake_case` key and a field type | one call per **distinct label** |
+| 4. Table | Groups what is left into columns and takes the header printed above each. The schedules are mostly tables of identical boxes with no per-row label | free |
+| 5. Semantic | Hands the recovered label to Claude, gets back a canonical `snake_case` key and a field type | one call per **distinct label** |
 
-On the 2025 form, phases 1–3 recover a label for 44 fields without a single
-model call; phase 4 names them.
+On the 2025 form the free phases recover a label for 162 of 199 fields without
+a single model call; the semantic phase names them.
 
 Two things that look like details and are not:
 
@@ -85,6 +86,51 @@ widget's label search is clipped at its left-hand neighbour on the row.
 **Confidence floor.** A field the model is less than 55% sure about is left
 *unresolved* rather than guessed. An empty box on a tax form is a visible
 omission; a wrong box is a silent error.
+
+## It is not a 1040 tool
+
+Nothing in the mapping is specific to the 1040 — the phases run against any
+fillable IRS PDF. Measured across eleven real forms pulled from irs.gov:
+
+| Form | Fields | Label recovered |
+|---|---|---|
+| 1040 | 199 | 81% |
+| Schedule B | 72 | **100%** |
+| Schedule C | 105 | 90% |
+| Schedule SE | 27 | **100%** |
+| Schedule SR | 27 | 93% |
+| Form 2441 | 72 | 79% |
+| W-9 | 23 | 78% |
+| Schedule 1 / 2 / 3 | 173 | 62-66% |
+| Form 8812 | 38 | 58% |
+| **Total** | **736** | **80%** |
+
+Schedule B was 31% before the table phase: it is a two-column ledger of payer
+names and amounts, rows every 12pt, no per-row label anywhere — the label is a
+column header printed once at the top. Grouping leftover widgets into columns
+and reading the header above each took it to 100%, and gives every cell a row
+index so it stays addressable:
+
+```bash
+taxorchestra fetch-form --form f1040sb
+taxorchestra map --template data/forms/f1040sb.pdf
+taxorchestra fill-form data/forms/f1040sb.pdf --values amounts.json
+```
+
+```json
+{ "amount_row1": 1284, "amount_row2": 512, "amount_row3": 96 }
+```
+
+**What generalises is placement, not correctness.** Putting a value in the right
+box on an arbitrary form is solved. Knowing *which* value belongs there is tax
+logic, written per form, and only the 1040 ordinary-income case is implemented
+(`taxorchestra file`). `fill-form` is deliberately the honest surface for
+everything else: you supply the numbers, it places them.
+
+One caveat on the bundled `fixture` provider: its naming rules are mostly
+1040-specific, so semantic resolution on other forms is low without a real
+model. Label recovery — the part that is actually hard — is provider-independent,
+which is why the table above measures that.
 
 ## Caching
 
@@ -98,9 +144,9 @@ Measured, `--provider fixture`, 199 widgets:
 
 | | time | model calls |
 |---|---|---|
-| Cold (resolve + compute + fill) | 1.98 s | 144 |
-| Warm (cached catalog) | 1.48 s | 0 |
-| Cached catalog read alone | **2.1 ms** | 0 |
+| Cold (resolve + compute + fill) | 1.63 s | 145 |
+| Warm (cached catalog) | 1.25 s | 0 |
+| Cached catalog read alone | **~2 ms** | 0 |
 
 The warm end-to-end time is dominated by parsing and rewriting a 220 KB PDF,
 not by the mapping. Backends: `sqlite` (default), `dynamodb`, `memory`.
@@ -113,7 +159,7 @@ falls back to handing Claude the PDF itself for scans and unusual layouts. The
 cheapest correct answer wins, and `confidence` records which path produced the
 record.
 
-**2. FormMapping** — the four phases above.
+**2. FormMapping** — the five phases above.
 
 **3. Validation** — re-derives every total from its components. This is
 deliberately *not* a model call. The failure mode it exists to catch is a
@@ -150,18 +196,18 @@ field it was meant to go in. Counting successful write calls would be measuring
 our own optimism — a field can be written and still not land.
 
 ```
-accuracy: 21/21 = 100.0%   mismatches=[]
+accuracy: 22/22 = 100.0%   mismatches=[]
 ```
 
 ```bash
 taxorchestra benchmark --json out/benchmark.json
 ```
 
-The full suite is 30 tests, all on the deterministic `fixture` provider — no API
+The full suite is 40 tests, all on the deterministic `fixture` provider — no API
 key, no spend:
 
 ```bash
-pytest          # 30 passed
+pytest          # 40 passed
 ```
 
 One of them caught a real bug worth keeping: `Decimal.quantize` defaults to
@@ -251,10 +297,11 @@ real return against, not as a return.
 
 | | |
 |---|---|
-| `fetch-form` | download the blank Form 1040 |
+| `fetch-form` | download any blank IRS form (`--form f1040sb`) |
 | `samples` | generate synthetic source documents |
 | `map` | resolve the form's field names and print the catalog |
-| `file` | read documents, compute, validate, fill |
+| `file` | read documents, compute, validate, fill (1040 only) |
+| `fill-form` | place a JSON of values onto any mapped form |
 | `interview` | fill the form by answering questions |
 | `benchmark` | fill accuracy and the cold/warm cache split |
 
