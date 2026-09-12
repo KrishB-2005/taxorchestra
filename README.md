@@ -333,5 +333,3 @@ wrong refund.
 - Swappable infrastructure throughout: Claude API ↔ Bedrock, SQLite ↔ DynamoDB,
   BM25 ↔ Elasticsearch. Nothing upstream changes when a deployment outgrows the
   local default.
-
-MIT.
